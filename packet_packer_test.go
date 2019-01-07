@@ -9,7 +9,7 @@ import (
 	"github.com/lucas-clemente/quic-go/internal/ackhandler"
 	"github.com/lucas-clemente/quic-go/internal/handshake"
 	"github.com/lucas-clemente/quic-go/internal/mocks"
-	"github.com/lucas-clemente/quic-go/internal/mocks/ackhandler"
+	mockackhandler "github.com/lucas-clemente/quic-go/internal/mocks/ackhandler"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/wire"
 	. "github.com/onsi/ginkgo"
@@ -788,7 +788,8 @@ var _ = Describe("Packet packer", func() {
 				Expect(err).ToNot(HaveOccurred())
 				Expect(firstPayloadByte).To(Equal(byte(0)))
 				// ... followed by the stream frame
-				frame, err := wire.ParseNextFrame(r, packer.version)
+				frameParser := wire.NewFrameParser(packer.version)
+				frame, err := frameParser.ParseNext(r)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(frame).To(Equal(f))
 				Expect(r.Len()).To(BeZero())
