@@ -120,8 +120,11 @@ type session struct {
 	receivedFirstPacket              bool
 	receivedFirstForwardSecurePacket bool
 
-	sessionCreationTime     time.Time
-	lastNetworkActivityTime time.Time
+	sessionCreationTime time.Time
+	// The idle timeout is set based on the max of the time we received the last packet...
+	lastPacketReceivedTime time.Time
+	// ... and the time we sent a new retransmittable packet after receiving a packet.
+	firstRetransmittablePacketAfterIdleSentTime time.Time
 	// pacingDeadline is the time when the next packet should be sent
 	pacingDeadline time.Time
 
@@ -312,7 +315,7 @@ func (s *session) postSetup() error {
 
 	s.timer = utils.NewTimer()
 	now := time.Now()
-	s.lastNetworkActivityTime = now
+	s.lastPacketReceivedTime = now
 	s.sessionCreationTime = now
 
 	s.windowUpdateQueue = newWindowUpdateQueue(s.streamsMap, s.connFlowController, s.framer.QueueControlFrame)
@@ -389,7 +392,7 @@ runLoop:
 		if s.pacingDeadline.IsZero() { // the timer didn't have a pacing deadline set
 			pacingDeadline = s.sentPacketHandler.TimeUntilSend()
 		}
-		if s.config.KeepAlive && !s.keepAlivePingSent && s.handshakeComplete && time.Since(s.lastNetworkActivityTime) >= s.peerParams.IdleTimeout/2 {
+		if s.config.KeepAlive && !s.keepAlivePingSent && s.handshakeComplete && s.firstRetransmittablePacketAfterIdleSentTime.IsZero() && time.Since(s.lastPacketReceivedTime) >= s.peerParams.IdleTimeout/2 {
 			// send a PING frame since there is no activity in the session
 			s.logger.Debugf("Sending a keep-alive ping to keep the connection alive.")
 			s.framer.QueueControlFrame(&wire.PingFrame{})
@@ -406,7 +409,7 @@ runLoop:
 			s.closeLocal(qerr.Error(qerr.HandshakeTimeout, "Crypto handshake did not complete in time."))
 			continue
 		}
-		if s.handshakeComplete && now.Sub(s.lastNetworkActivityTime) >= s.config.IdleTimeout {
+		if s.handshakeComplete && now.Sub(s.idleTimeoutStartTime()) >= s.config.IdleTimeout {
 			s.closeLocal(qerr.Error(qerr.NetworkIdleTimeout, "No recent network activity."))
 			continue
 		}
@@ -436,9 +439,9 @@ func (s *session) ConnectionState() ConnectionState {
 func (s *session) maybeResetTimer() {
 	var deadline time.Time
 	if s.config.KeepAlive && s.handshakeComplete && !s.keepAlivePingSent {
-		deadline = s.lastNetworkActivityTime.Add(s.peerParams.IdleTimeout / 2)
+		deadline = s.idleTimeoutStartTime().Add(s.peerParams.IdleTimeout / 2)
 	} else {
-		deadline = s.lastNetworkActivityTime.Add(s.config.IdleTimeout)
+		deadline = s.idleTimeoutStartTime().Add(s.config.IdleTimeout)
 	}
 
 	if ackAlarm := s.receivedPacketHandler.GetAlarmTimeout(); !ackAlarm.IsZero() {
@@ -456,6 +459,10 @@ func (s *session) maybeResetTimer() {
 	}
 
 	s.timer.Reset(deadline)
+}
+
+func (s *session) idleTimeoutStartTime() time.Time {
+	return utils.MaxTime(s.lastPacketReceivedTime, s.firstRetransmittablePacketAfterIdleSentTime)
 }
 
 func (s *session) handleHandshakeComplete() {
@@ -536,7 +543,8 @@ func (s *session) handleUnpackedPacket(packet *unpackedPacket, rcvTime time.Time
 	}
 
 	s.receivedFirstPacket = true
-	s.lastNetworkActivityTime = rcvTime
+	s.lastPacketReceivedTime = rcvTime
+	s.firstRetransmittablePacketAfterIdleSentTime = time.Time{}
 	s.keepAlivePingSent = false
 
 	// The client completes the handshake first (after sending the CFIN).
@@ -723,7 +731,7 @@ func (s *session) handlePathChallengeFrame(frame *wire.PathChallengeFrame) {
 }
 
 func (s *session) handleAckFrame(frame *wire.AckFrame, pn protocol.PacketNumber, encLevel protocol.EncryptionLevel) error {
-	if err := s.sentPacketHandler.ReceivedAck(frame, pn, encLevel, s.lastNetworkActivityTime); err != nil {
+	if err := s.sentPacketHandler.ReceivedAck(frame, pn, encLevel, s.lastPacketReceivedTime); err != nil {
 		return err
 	}
 	s.receivedPacketHandler.IgnoreBelow(s.sentPacketHandler.GetLowestPacketNotConfirmedAcked())
@@ -974,6 +982,9 @@ func (s *session) sendPacket() (bool, error) {
 
 func (s *session) sendPackedPacket(packet *packedPacket) error {
 	defer packet.buffer.Release()
+	if s.firstRetransmittablePacketAfterIdleSentTime.IsZero() && packet.IsRetransmittable() {
+		s.firstRetransmittablePacketAfterIdleSentTime = time.Now()
+	}
 	s.logPacket(packet)
 	return s.conn.Write(packet.raw)
 }
