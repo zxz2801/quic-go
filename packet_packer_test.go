@@ -9,7 +9,7 @@ import (
 	"github.com/lucas-clemente/quic-go/internal/ackhandler"
 	"github.com/lucas-clemente/quic-go/internal/handshake"
 	"github.com/lucas-clemente/quic-go/internal/mocks"
-	"github.com/lucas-clemente/quic-go/internal/mocks/ackhandler"
+	mockackhandler "github.com/lucas-clemente/quic-go/internal/mocks/ackhandler"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/wire"
 	. "github.com/onsi/ginkgo"
@@ -30,7 +30,7 @@ var _ = Describe("Packet packer", func() {
 	)
 
 	checkLength := func(data []byte) {
-		hdr, err := wire.ParseHeader(bytes.NewReader(data), 0)
+		hdr, _, _, err := wire.ParsePacket(data, 0)
 		Expect(err).ToNot(HaveOccurred())
 		r := bytes.NewReader(data)
 		extHdr, err := hdr.ParseExtended(r, protocol.VersionWhatever)
@@ -776,7 +776,7 @@ var _ = Describe("Packet packer", func() {
 				Expect(err).ToNot(HaveOccurred())
 				// cut off the tag that the mock sealer added
 				packet.raw = packet.raw[:len(packet.raw)-sealer.Overhead()]
-				hdr, err := wire.ParseHeader(bytes.NewReader(packet.raw), len(packer.destConnID))
+				hdr, _, _, err := wire.ParsePacket(packet.raw, len(packer.destConnID))
 				Expect(err).ToNot(HaveOccurred())
 				r := bytes.NewReader(packet.raw)
 				extHdr, err := hdr.ParseExtended(r, packer.version)
